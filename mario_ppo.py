@@ -1,47 +1,66 @@
+from nes_py.wrappers import JoypadSpace
 import gym
+from gym import spaces
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
 import gym_super_mario_bros
-from gym.wrappers import GrayScaleObservation
+from gym.wrappers import GrayScaleObservation,FrameStack
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+import time
 import numpy as np
-from collections import deque
+import cv2
 
 class CustumGym(gym.Wrapper):
-    def __init__(self, env, n_frames, channels_order='last'):
+    def __init__(self, env):
         super(CustumGym, self).__init__(env)
-        self.n_frames = n_frames
-        self.channels_order = channels_order
-        self.frames = deque(maxlen=n_frames)
-
-        obs_shape = env.observation_space.shape
-        if channels_order == 'last':
-            self.stacked_shape = (obs_shape[0], obs_shape[1], obs_shape[2] * n_frames)
-        else:
-            self.stacked_shape = (obs_shape[0] * n_frames, obs_shape[1], obs_shape[2])
-
-        self.observation_space = gym.spaces.Box(
-            low=0, high=255, shape=self.stacked_shape, dtype=env.observation_space.dtype
-        )
+        self.env = env
+        self.observation_space = spaces.Box(low=0, high=255, shape=(80, 80, 4), dtype=np.uint8)
+        self.s_t = None
+        self.state = None
+        self.last_render_time = time.perf_counter()
+        self.fps = 60  # 设定目标帧率
 
     def reset(self):
         obs = self.env.reset()
-        for _ in range(self.n_frames):
-            self.frames.append(obs)
-        return self._get_observation()
+        self.state = obs
+        x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
+        ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
+        x_t = self.image_to_frames(x_t)
+        return x_t
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
-        self.frames.append(obs)
-        return self._get_observation(), reward, done, info
+        self.state = obs
+        x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
+        ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
+        x_t = self.image_to_frames(x_t)
+        return x_t, reward, done, info
 
-    def _get_observation(self):
-        if self.channels_order == 'last':
-            return np.concatenate(list(self.frames), axis=-1)
+    def image_to_frames(self, x_t):
+        if self.s_t is None:
+            self.s_t = np.stack((x_t, x_t, x_t, x_t), axis=2)
         else:
-            return np.concatenate(list(self.frames), axis=0)
+            x_t = np.reshape(x_t, (80, 80, 1))
+            self.s_t = np.append(x_t, self.s_t[:, :, :3], axis=2)
+        return self.s_t
+
+    def render(self, mode='human'):
+        current_time = time.perf_counter()
+        elapsed = current_time - self.last_render_time
+        wait_time = max(0, 1 / self.fps - elapsed)
+        time.sleep(wait_time)
+        self.last_render_time = time.perf_counter()
+
+        if mode == 'human':
+            # 如果是人类模式，则显示图片（例如使用 OpenCV 显示）
+            cv2.imshow("CustomEnv", self.state)
+            cv2.waitKey(1)
+        elif mode == 'rgb_array':
+            # 返回当前帧的图像数据
+            return self.state
+
 
 class PolicyNetwork(nn.Module):
     def __init__(self, action_dim):
@@ -141,16 +160,15 @@ def ppo_update(policy_net, value_net, optimizer, states, actions, log_probs, ret
 def main():
 
     replay_buffer_size = 10000
-    use_save = True
+    use_save = False
     save_actor_path = "actor.pth"
     save_critic_path = "critic.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     # 创建马里奥环境
     env = gym_super_mario_bros.make('SuperMarioBros-1-2-v0')
-    env = gym.wrappers.ResizeObservation(env, (80, 80))
-    env = GrayScaleObservation(env, keep_dim=True)
-    env = CustumGym(env, 4, channels_order='last')
+    env = JoypadSpace(env, COMPLEX_MOVEMENT)
+    env = CustumGym(env)
     action_dim = env.action_space.n
 
     if use_save:
@@ -170,9 +188,10 @@ def main():
         state = env.reset()
         states, actions, rewards, log_probs, values, probs, masks = [], [], [], [], [], [], []
 
-        done = False
+        # done = False
         iter = 0
         while True:
+            env.render()
             state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
             with torch.no_grad():
                 action_probs = policy_net(state_tensor)
@@ -187,7 +206,7 @@ def main():
             # print(reward)
             if done:
                 masks.append(False)
-                env.reset_image()
+                env.reset()
             else:
                 masks.append(True)
 
@@ -220,6 +239,6 @@ def main():
             # print(f'Episode {episode}, Return: {sum(rewards)}')
             torch.save(policy_net, save_actor_path)
             torch.save(value_net, save_critic_path)
-
+    env.close()
 if __name__ == '__main__':
     main()
