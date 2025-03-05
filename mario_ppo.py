@@ -55,7 +55,8 @@ class CustumGym(gym.Wrapper):
 
         if mode == 'human':
             # 如果是人类模式，则显示图片（例如使用 OpenCV 显示）
-            cv2.imshow("CustomEnv", self.state)
+            bgr_state = cv2.cvtColor(self.state, cv2.COLOR_RGB2BGR)
+            cv2.imshow("CustomEnv",bgr_state)
             cv2.waitKey(1)
         elif mode == 'rgb_array':
             # 返回当前帧的图像数据
@@ -79,7 +80,7 @@ class PolicyNetwork(nn.Module):
         x = x.reshape(-1,1600)
         x = torch.relu(self.fc1(x))
         x = self.fc2(x)
-        return torch.sigmoid(x)
+        return torch.softmax(x,dim=-1)
 
 class ValueNetwork(nn.Module):
     def __init__(self, action_dim):
@@ -166,7 +167,7 @@ def main():
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     # 创建马里奥环境
-    env = gym_super_mario_bros.make('SuperMarioBros-1-2-v0')
+    env = gym_super_mario_bros.make('SuperMarioBros-v0')
     env = JoypadSpace(env, COMPLEX_MOVEMENT)
     env = CustumGym(env)
     action_dim = env.action_space.n
