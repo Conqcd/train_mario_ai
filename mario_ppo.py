@@ -185,7 +185,7 @@ def main():
 
     for episode in range(max_episodes):
         state = env.reset()
-        states, actions, rewards, log_probs, values, probs, masks = [], [], [], [], [], [], []
+        states, actions, rewards, log_probs, values, masks = [], [], [], [], [], []
 
         # done = False
         iter = 0
@@ -195,8 +195,8 @@ def main():
             with torch.no_grad():
                 action_probs = policy_net(state_tensor)
                 value = value_net(state_tensor)
-            two_probs = torch.stack([action_probs[:,0], 1 - action_probs[:,0]], dim=1)
-            dist = Categorical(two_probs)
+            # two_probs = torch.stack([action_probs[:,0], 1 - action_probs[:,0]], dim=1)
+            dist = Categorical(action_probs)
             action = dist.sample()
             log_prob = dist.log_prob(action)
             # print(two_probs.detach().cpu().numpy(),action.detach().cpu().numpy())
@@ -209,7 +209,6 @@ def main():
             else:
                 masks.append(True)
 
-            probs.append(two_probs)
             states.append(state)
             actions.append(action)
             rewards.append(reward)

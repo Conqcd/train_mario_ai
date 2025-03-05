@@ -1,2 +1,3 @@
 torch==2.0.1+cu118
 gym-super-mario-bros==7.3.0
+opencv-python
