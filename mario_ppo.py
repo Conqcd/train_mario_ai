@@ -81,14 +81,14 @@ class PolicyNetwork(nn.Module):
         return torch.softmax(x,dim=-1)
 
 class ValueNetwork(nn.Module):
-    def __init__(self, action_dim):
+    def __init__(self):
         super(ValueNetwork, self).__init__()
         self.conv1 = nn.Conv2d(4, 32, kernel_size=8, stride=4, padding=1, padding_mode='replicate')
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1, padding_mode='replicate')
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, padding_mode='replicate')
         self.pool1 = nn.MaxPool2d(2, 2, padding=1)
         self.fc1 = nn.Linear(1600, 512)
-        self.fc2 = nn.Linear(512, action_dim)
+        self.fc2 = nn.Linear(512, 1)
 
     def forward(self, x):
         x = self.pool1(torch.relu(self.conv1(x)))
@@ -134,8 +134,8 @@ def ppo_update(policy_net, value_net, optimizer, states, actions, log_probs, ret
 
     for _ in range(25):  # Update for 10 epochs
         action_probs = policy_net(states)
-        two_probs = torch.stack([action_probs[:,0], 1 - action_probs[:,0]], dim=1)
-        dist = Categorical(two_probs)
+        # two_probs = torch.stack([action_probs[:,0], 1 - action_probs[:,0]], dim=1)
+        dist = Categorical(action_probs)
         new_log_probs = dist.log_prob(actions).unsqueeze(1)
         entropy = dist.entropy().unsqueeze(1).sum(-1).mean()
 
@@ -175,7 +175,7 @@ def main():
         value_net = torch.load(save_critic_path, map_location = device, weights_only=False)
     else:
         policy_net = PolicyNetwork(action_dim).to(device)
-        value_net = ValueNetwork(action_dim).to(device)
+        value_net = ValueNetwork().to(device)
     params = list(policy_net.parameters()) + list(value_net.parameters())
     optimizer = optim.AdamW(params, lr=1e-4, amsgrad=True,weight_decay=0.001)
 
@@ -223,6 +223,8 @@ def main():
                 break
 
         returns = compute_returns(rewards, values, gamma, gae_lambda, masks)
+        # returns = torch.stack(returns)
+        # returns.to(device)
         returns = torch.FloatTensor(returns).to(device).unsqueeze(1)
         states = torch.FloatTensor(states).permute(0, 3, 1, 2).to(device)
         actions = torch.LongTensor(actions).to(device)
