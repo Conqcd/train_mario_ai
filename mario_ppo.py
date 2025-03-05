@@ -6,15 +6,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical
 import gym_super_mario_bros
-from gym.wrappers import GrayScaleObservation,FrameStack
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 import time
 import numpy as np
 import cv2
 
-class CustumGym(gym.Wrapper):
+class CustumEnv(gym.Wrapper):
     def __init__(self, env):
-        super(CustumGym, self).__init__(env)
+        super(CustumEnv, self).__init__(env)
         self.env = env
         self.observation_space = spaces.Box(low=0, high=255, shape=(80, 80, 4), dtype=np.uint8)
         self.s_t = None
@@ -32,7 +31,7 @@ class CustumGym(gym.Wrapper):
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
-        self.state = obs
+        self.state = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
         x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
         ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
         x_t = self.image_to_frames(x_t)
@@ -55,8 +54,7 @@ class CustumGym(gym.Wrapper):
 
         if mode == 'human':
             # 如果是人类模式，则显示图片（例如使用 OpenCV 显示）
-            bgr_state = cv2.cvtColor(self.state, cv2.COLOR_RGB2BGR)
-            cv2.imshow("CustomEnv",bgr_state)
+            cv2.imshow("Super Mario", self.state)
             cv2.waitKey(1)
         elif mode == 'rgb_array':
             # 返回当前帧的图像数据
@@ -169,7 +167,7 @@ def main():
     # 创建马里奥环境
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     env = JoypadSpace(env, COMPLEX_MOVEMENT)
-    env = CustumGym(env)
+    env = CustumEnv(env)
     action_dim = env.action_space.n
 
     if use_save:
