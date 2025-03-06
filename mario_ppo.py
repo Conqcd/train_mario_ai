@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.distributions import Categorical
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 import time
 import numpy as np
 import cv2
@@ -25,7 +26,7 @@ class CustumEnv(gym.Wrapper):
         obs = self.env.reset()
         self.state = obs
         x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
-        ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
+        # ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
         x_t = self.image_to_frames(x_t)
         return x_t
 
@@ -33,7 +34,7 @@ class CustumEnv(gym.Wrapper):
         obs, reward, done, info = self.env.step(action)
         self.state = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
         x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
-        ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
+        # ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
         x_t = self.image_to_frames(x_t)
         return x_t, reward, done, info
 
@@ -99,6 +100,92 @@ class ValueNetwork(nn.Module):
         x = self.fc2(x)
         return x
 
+
+class RolloutStorage(object):
+    def __init__(self, num_steps, num_processes, obs_shape, action_dim, state_size):
+        self.observations = torch.zeros(num_steps + 1, num_processes, *obs_shape)
+        self.rewards = torch.zeros(num_steps, num_processes, 1)
+        self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
+        self.returns = torch.zeros(num_steps + 1, num_processes, 1)
+        self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
+        self.actions = torch.zeros(num_steps, num_processes, 1)
+        self.masks = torch.ones(num_steps + 1, num_processes, 1)
+        # self.bad_masks = torch.ones(num_steps + 1, num_processes, 1)
+
+        self.num_steps = num_steps
+        self.step = 0
+
+    def to(self, device):
+        self.observations = self.observations.to(device)
+        self.rewards = self.rewards.to(device)
+        self.value_preds = self.value_preds.to(device)
+        self.returns = self.returns.to(device)
+        self.action_log_probs = self.action_log_probs.to(device)
+        self.actions = self.actions.to(device)
+        self.masks = self.masks.to(device)
+
+    def insert(
+            self, current_obs, action, action_log_prob, value_pred, reward, mask
+    ):
+        self.observations[self.step + 1].copy_(current_obs)
+        self.actions[self.step].copy_(action)
+        self.action_log_probs[self.step].copy_(action_log_prob)
+        self.value_preds[self.step].copy_(value_pred)
+        self.rewards[self.step].copy_(reward)
+        self.masks[self.step + 1].copy_(mask)
+
+        self.step = (self.step + 1) % self.num_steps
+    def after_update(self):
+        self.observations[0].copy_(self.observations[-1])
+        self.masks[0].copy_(self.masks[-1])
+
+    def compute_returns(self,next_value,use_gae,gamma,gae_lambda):
+        if use_gae:
+            self.value_preds[-1] = next_value
+            gae = 0
+            for step in reversed(range(self.num_steps)):
+                delta = (
+                    self.rewards[step]
+                    + gamma * self.value_preds[step + 1] * self.masks[step + 1]
+                    - self.value_preds[step]
+                )
+                gae = delta + gamma * gae_lambda * self.masks[step + 1] * gae
+                # gae = gae * self.bad_masks[step + 1]
+                self.returns[step] = gae + self.value_preds[step]
+        else:
+            self.returns = next_value
+            for step in reversed(range(self.num_steps)):
+                self.returns[step] = (
+                (
+                        self.returns[step + 1] * gamma * self.masks[step + 1]
+                    + self.rewards[step]
+                )
+                # * self.bad_masks[step + 1]
+                    +
+                # + (1 - self.bad_masks[step + 1]) *
+                    self.value_preds[step]
+                )
+
+    def feed_forward_generator(self, advantages, num_mini_batch):
+        num_steps, num_processes = self.rewards.size()[0:2]
+        batch_size = num_processes * num_steps
+        mini_batch_size = batch_size // num_mini_batch
+        sampler = BatchSampler(
+            SubsetRandomSampler(range(batch_size)), mini_batch_size, drop_last=False
+        )
+        for indices in sampler:
+            observations_batch = self.observations[:-1].view(
+                -1, *self.observations.size()[2:]
+            )[indices]
+            actions_batch = self.actions.view(-1, self.actions.size(-1))[indices]
+            return_batch = self.returns[:-1].view(-1, 1)[indices]
+            masks_batch = self.masks[:-1].view(-1, 1)[indices]
+            old_action_log_probs_batch = self.action_log_probs.view(-1, 1)[indices]
+            adv_targ = advantages.view(-1, 1)[indices]
+
+            yield observations_batch, actions_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ
+
+
 def compute_returns(rewards, values, gamma, gae_lambda, masks):
     returns = []
     gae = 0
@@ -116,50 +203,67 @@ def compute_returns(rewards, values, gamma, gae_lambda, masks):
         returns.insert(0, gae + v)
     return returns
 
-def ppo_update(policy_net, value_net, optimizer, states, actions, log_probs, returns, advantages, clip_epsilon=0.2,max_grad_norm=1.0):
+def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
     wv = 1
     we = 0.0001
+    num_mini_batch = 64
 
-    # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
+    advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
+    # advantages = rollouts.returns - rollouts.values
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
 
-    for _ in range(50):  # Update for 10 epochs
-        values = value_net(states)
-        value_loss = (returns - values).pow(2).mean()
-        print(value_loss.detach().cpu().numpy())
+    # for _ in range(50):  # Update for 50 epochs
+    #     values = value_net(states)
+    #     value_loss = (returns - values).pow(2).mean()
+    #     print(value_loss.detach().cpu().numpy())
+    #
+    #     optimizer.zero_grad()
+    #     value_loss.backward()
+    #     optimizer.step()
 
-        optimizer.zero_grad()
-        value_loss.backward()
-        optimizer.step()
+    for _ in range(10):  # Update for 10 epochs
 
-    for _ in range(25):  # Update for 10 epochs
-        action_probs = policy_net(states)
-        # two_probs = torch.stack([action_probs[:,0], 1 - action_probs[:,0]], dim=1)
-        dist = Categorical(action_probs)
-        new_log_probs = dist.log_prob(actions).unsqueeze(1)
-        entropy = dist.entropy().unsqueeze(1).sum(-1).mean()
-
-        ratio = torch.exp(new_log_probs - log_probs)
-        surr1 = ratio * advantages
-        surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages
-        policy_loss = -torch.min(surr1, surr2).mean()
-
-        values = value_net(states)
-        value_loss = (returns - values).pow(2).mean()
-
-        optimizer.zero_grad()
-        loss = value_loss * wv - entropy * we + policy_loss * wa
-        print(policy_loss.detach().cpu().numpy(), value_loss.detach().cpu().numpy(), entropy.detach().cpu().numpy(),loss.detach().cpu().numpy())
-        loss.backward()
-        nn.utils.clip_grad_norm_(
-            policy_net.parameters(), max_grad_norm
+        data_generator = rollouts.feed_forward_generator(
+            advantages, num_mini_batch
         )
-        optimizer.step()
+
+        for sample in data_generator:
+            (
+                states,
+                actions,
+                returns,
+                masks_batch,
+                old_action_log_probs_batch,
+                adv_targ,
+            ) = sample
+
+            action_probs = policy_net(states)
+            dist = Categorical(action_probs)
+            new_log_probs = dist.log_prob(actions).unsqueeze(1)
+            entropy = dist.entropy().unsqueeze(1).sum(-1).mean()
+
+            ratio = torch.exp(new_log_probs - old_action_log_probs_batch)
+            surr1 = ratio * adv_targ
+            surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * adv_targ
+            policy_loss = -torch.min(surr1, surr2).mean()
+
+            values = value_net(states)
+            value_loss = (returns - values).pow(2).mean()
+
+            optimizer.zero_grad()
+            loss = value_loss * wv - entropy * we + policy_loss * wa
+            print(policy_loss.detach().cpu().numpy(), value_loss.detach().cpu().numpy(), entropy.detach().cpu().numpy(),loss.detach().cpu().numpy())
+            loss.backward()
+            nn.utils.clip_grad_norm_(
+                policy_net.parameters(), max_grad_norm
+            )
+            optimizer.step()
 
 def main():
 
     replay_buffer_size = 10000
-    use_save = False
+    use_save = True
     save_actor_path = "actor.pth"
     save_critic_path = "critic.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -180,63 +284,61 @@ def main():
     optimizer = optim.AdamW(params, lr=1e-4, amsgrad=True,weight_decay=0.001)
 
     max_episodes = 1000000
-    gamma = 0.99
+    gamma = 0.75 #0.99
     gae_lambda = 0.99
 
-    for episode in range(max_episodes):
-        state = env.reset()
-        states, actions, rewards, log_probs, values, masks = [], [], [], [], [], []
+    rollouts = RolloutStorage(
+        replay_buffer_size,
+        1,
+        (env.observation_space.shape[-1],*env.observation_space.shape[:-1]),
+        action_dim,
+        0,
+    )
 
-        # done = False
-        iter = 0
-        while True:
+    state = env.reset()
+    state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2)
+    rollouts.observations[0].copy_(state_tensor)
+    rollouts.to(device)
+
+    for episode in range(max_episodes):
+
+        for step in range(replay_buffer_size):
             env.render()
             state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
             with torch.no_grad():
                 action_probs = policy_net(state_tensor)
                 value = value_net(state_tensor)
-            # two_probs = torch.stack([action_probs[:,0], 1 - action_probs[:,0]], dim=1)
             dist = Categorical(action_probs)
             action = dist.sample()
             log_prob = dist.log_prob(action)
-            # print(two_probs.detach().cpu().numpy(),action.detach().cpu().numpy())
 
             next_state, reward, done, _ = env.step(action.item())
-            # print(reward)
+            # masks = (~done).float()
+            masks = float(not done)
+            print(reward)
             if done:
-                masks.append(False)
-                env.reset()
-            else:
-                masks.append(True)
+                # masks.append(False)
+                next_state = env.reset()
+            # else:
+                # masks.append(True)
 
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            log_probs.append(log_prob)
-            values.append(value)
+
+            rollouts.insert(
+                state_tensor, action, log_prob, value, reward, masks
+            )
 
             state = next_state
 
-            iter += 1
 
-            if done and iter >= replay_buffer_size:
-                break
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
+            next_value = value_net(state_tensor)
+        rollouts.compute_returns(next_value, True, gamma, gae_lambda)
 
-        returns = compute_returns(rewards, values, gamma, gae_lambda, masks)
-        # returns = torch.stack(returns)
-        # returns.to(device)
-        returns = torch.FloatTensor(returns).to(device).unsqueeze(1)
-        states = torch.FloatTensor(states).permute(0, 3, 1, 2).to(device)
-        actions = torch.LongTensor(actions).to(device)
-        log_probs = torch.stack(log_probs)
-        values = torch.stack(values).squeeze(1)
-        advantages = returns - values
+        ppo_update(policy_net, value_net, optimizer, rollouts)
+        rollouts.after_update()
 
-        ppo_update(policy_net, value_net, optimizer, states, actions, log_probs, returns, advantages)
-
-        print(f'Episode {episode}, Return: {sum(rewards)}')
         if episode % 10 == 0:
-            # print(f'Episode {episode}, Return: {sum(rewards)}')
             torch.save(policy_net, save_actor_path)
             torch.save(value_net, save_critic_path)
     env.close()
