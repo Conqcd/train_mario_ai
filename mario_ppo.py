@@ -16,36 +16,37 @@ class CustumEnv(gym.Wrapper):
     def __init__(self, env):
         super(CustumEnv, self).__init__(env)
         self.env = env
-        self.observation_space = spaces.Box(low=0, high=255, shape=(80, 80, 4), dtype=np.uint8)
+        self.observation_space = spaces.Box(low=0, high=255, shape=(84, 84, 4), dtype=np.uint8)
         self.s_t = None
         self.state = None
         self.last_render_time = time.perf_counter()
         self.fps = 60  # 设定目标帧率
-        self.last_info = None
+        self.last_score = 0
 
     def reset(self):
         obs = self.env.reset()
         self.state = obs
-        x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
-        # ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
+        x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)
         x_t = self.image_to_frames(x_t)
+        self.last_score = 0
         return x_t
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self.state = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
-        x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
-        # ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
+        x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)
         x_t = self.image_to_frames(x_t)
 
-        if self.last_info is not None:
-            reward += info['score'] - self.last_info['score']
-        if info['flag_get']:
-            reward += 100
-        if info['status'] == 'tall':
-            reward += 1
+        reward += info['score'] - self.last_score
+        if done:
+            if info["flag_get"]:
+                reward += 50
+            else:
+                reward -= 50
+        # if info['status'] == 'tall':
+        #     reward += 1
 
-        self.last_info = info
+        self.last_score = info['score']
 
         return x_t, reward, done, info
 
@@ -53,7 +54,7 @@ class CustumEnv(gym.Wrapper):
         if self.s_t is None:
             self.s_t = np.stack((x_t, x_t, x_t, x_t), axis=2)
         else:
-            x_t = np.reshape(x_t, (80, 80, 1))
+            x_t = np.reshape(x_t, (84, 84, 1))
             self.s_t = np.append(x_t, self.s_t[:, :, :3], axis=2)
         return self.s_t
 
@@ -82,6 +83,7 @@ class PolicyNetwork(nn.Module):
         self.pool1 = nn.MaxPool2d(2, 2, padding=1)
         self.fc1 = nn.Linear(1600, 512)
         self.fc2 = nn.Linear(512, action_dim)
+        self.critic = nn.Linear(512, 1)
 
     def forward(self, x):
         x = self.pool1(torch.relu(self.conv1(x)))
@@ -89,27 +91,18 @@ class PolicyNetwork(nn.Module):
         x = torch.relu(self.conv3(x))
         x = x.reshape(-1,1600)
         x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return torch.softmax(x,dim=-1)
+        ac = self.fc2(x)
+        val = self.critic(x)
+        return torch.softmax(ac,dim=-1),val
 
-class ValueNetwork(nn.Module):
-    def __init__(self):
-        super(ValueNetwork, self).__init__()
-        self.conv1 = nn.Conv2d(4, 32, kernel_size=8, stride=4, padding=1, padding_mode='replicate')
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1, padding_mode='replicate')
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, padding_mode='replicate')
-        self.pool1 = nn.MaxPool2d(2, 2, padding=1)
-        self.fc1 = nn.Linear(1600, 512)
-        self.fc2 = nn.Linear(512, 1)
-
-    def forward(self, x):
+    def get_value(self,x):
         x = self.pool1(torch.relu(self.conv1(x)))
         x = torch.relu(self.conv2(x))
         x = torch.relu(self.conv3(x))
         x = x.reshape(-1,1600)
         x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+        val = self.critic(x)
+        return val
 
 
 class RolloutStorage(object):
@@ -198,7 +191,7 @@ class RolloutStorage(object):
 
 
 
-def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
+def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
     wv = 1
     we = 0.000 #0.0001
@@ -237,7 +230,7 @@ def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_
             surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * adv_targ
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            values = value_net(states)
+            values = policy_net.get_value(states)
             value_loss = (returns - values).pow(2).mean()
 
             optimizer.zero_grad()
@@ -252,9 +245,8 @@ def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_
 def main():
 
     replay_buffer_size = 10000
-    use_save = True
+    use_save = False
     save_actor_path = "actor.pth"
-    save_critic_path = "critic.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     # 创建马里奥环境
@@ -265,12 +257,9 @@ def main():
 
     if use_save:
         policy_net = torch.load(save_actor_path, map_location = device, weights_only=False)
-        value_net = torch.load(save_critic_path, map_location = device, weights_only=False)
     else:
         policy_net = PolicyNetwork(action_dim).to(device)
-        value_net = ValueNetwork().to(device)
-    params = list(policy_net.parameters()) + list(value_net.parameters())
-    optimizer = optim.AdamW(params, lr=1e-4, amsgrad=True,weight_decay=0.001)
+    optimizer = optim.AdamW(policy_net.parameters(), lr=1e-4, amsgrad=True,weight_decay=0.001)
 
     max_episodes = 1000000
     gamma = 0.90 #0.99
@@ -295,8 +284,7 @@ def main():
             env.render()
             state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
             with torch.no_grad():
-                action_probs = policy_net(state_tensor)
-                value = value_net(state_tensor)
+                action_probs, value = policy_net(state_tensor)
             dist = Categorical(action_probs)
             action = dist.sample()
             log_prob = dist.log_prob(action)
@@ -321,15 +309,14 @@ def main():
 
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
-            next_value = value_net(state_tensor)
+            next_value = policy_net.get_value(state_tensor)
         rollouts.compute_returns(next_value, True, gamma, gae_lambda)
 
-        ppo_update(policy_net, value_net, optimizer, rollouts)
+        ppo_update(policy_net, optimizer, rollouts)
         rollouts.after_update()
 
         if episode % 10 == 0:
             torch.save(policy_net, save_actor_path)
-            torch.save(value_net, save_critic_path)
     env.close()
 if __name__ == '__main__':
     main()
