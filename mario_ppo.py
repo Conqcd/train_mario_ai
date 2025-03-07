@@ -21,6 +21,7 @@ class CustumEnv(gym.Wrapper):
         self.state = None
         self.last_render_time = time.perf_counter()
         self.fps = 60  # 设定目标帧率
+        self.last_info = None
 
     def reset(self):
         obs = self.env.reset()
@@ -36,6 +37,16 @@ class CustumEnv(gym.Wrapper):
         x_t = cv2.cvtColor(cv2.resize(obs, (80, 80)), cv2.COLOR_BGR2GRAY)
         # ret, x_t = cv2.threshold(x_t, 1, 255, cv2.THRESH_BINARY)
         x_t = self.image_to_frames(x_t)
+
+        if self.last_info is not None:
+            reward += info['score'] - self.last_info['score']
+        if info['flag_get']:
+            reward += 100
+        if info['status'] == 'tall':
+            reward += 1
+
+        self.last_info = info
+
         return x_t, reward, done, info
 
     def image_to_frames(self, x_t):
@@ -186,41 +197,15 @@ class RolloutStorage(object):
             yield observations_batch, actions_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ
 
 
-def compute_returns(rewards, values, gamma, gae_lambda, masks):
-    returns = []
-    gae = 0
-    last_value = values[-1]
-    last_mask = masks[-1]
-    for r,v,m in reversed(list(zip(rewards,values,masks))):
-        # if(len(returns) == 0):
-        #     delta = r
-        #     gae = delta - v
-        # else:
-        delta = r + gamma * last_value * m - v
-        gae = delta + gamma * gae_lambda * gae * m
-        last_value = v
-        last_mask = m
-        returns.insert(0, gae + v)
-    return returns
 
 def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
     wv = 1
-    we = 0.0001
-    num_mini_batch = 128
+    we = 0.000 #0.0001
+    num_mini_batch = 32
 
     advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
-    # advantages = rollouts.returns - rollouts.values
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
-
-    # for _ in range(50):  # Update for 50 epochs
-    #     values = value_net(states)
-    #     value_loss = (returns - values).pow(2).mean()
-    #     print(value_loss.detach().cpu().numpy())
-    #
-    #     optimizer.zero_grad()
-    #     value_loss.backward()
-    #     optimizer.step()
+    # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     for _ in range(10):  # Update for 10 epochs
 
@@ -228,6 +213,7 @@ def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_
             advantages, num_mini_batch
         )
 
+        print("-----------------")
         for sample in data_generator:
             (
                 states,
@@ -287,8 +273,8 @@ def main():
     optimizer = optim.AdamW(params, lr=1e-4, amsgrad=True,weight_decay=0.001)
 
     max_episodes = 1000000
-    gamma = 0.75 #0.99
-    gae_lambda = 0.99
+    gamma = 0.90 #0.99
+    gae_lambda = 0.90
 
     rollouts = RolloutStorage(
         replay_buffer_size,
