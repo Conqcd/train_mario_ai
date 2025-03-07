@@ -207,7 +207,7 @@ def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_
     wa = 1
     wv = 1
     we = 0.0001
-    num_mini_batch = 64
+    num_mini_batch = 128
 
     advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
     # advantages = rollouts.returns - rollouts.values
@@ -239,9 +239,12 @@ def ppo_update(policy_net, value_net, optimizer, rollouts, clip_epsilon=0.2,max_
             ) = sample
 
             action_probs = policy_net(states)
-            dist = Categorical(action_probs)
-            new_log_probs = dist.log_prob(actions).unsqueeze(1)
-            entropy = dist.entropy().unsqueeze(1).sum(-1).mean()
+            # dist = Categorical(action_probs)
+            dist = [Categorical(a) for a in action_probs]
+            new_log_probs = torch.stack([dist[i].log_prob(actions[i]) for i in range(len(dist))])
+            # new_log_probs = dist.log_prob(actions).unsqueeze(1)
+            entropy = torch.stack([d.entropy() for d in dist]).mean()
+            # entropy = dist.entropy().unsqueeze(1).sum(-1).mean()
 
             ratio = torch.exp(new_log_probs - old_action_log_probs_batch)
             surr1 = ratio * adv_targ
@@ -315,7 +318,7 @@ def main():
             next_state, reward, done, _ = env.step(action.item())
             # masks = (~done).float()
             masks = float(not done)
-            print(reward)
+            print(action.cpu().detach().numpy(),reward)
             if done:
                 # masks.append(False)
                 next_state = env.reset()
