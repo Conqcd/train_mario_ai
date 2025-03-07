@@ -17,12 +17,13 @@ def main():
     while not done:
         env.render()
         state = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
-        actions = ppo(state)
+        actions,_ = ppo(state)
         action = actions.argmax().item()
-        if iter % 2 == 0:
-            action = 5
-        else:
-            action = 4
+        print(actions)
+        # if iter % 2 == 0:
+        #     action = 5
+        # else:
+        #     action = 4
         next_state, reward, done, _ = env.step(action)
         state = next_state
         iter += 1

@@ -157,7 +157,7 @@ class RolloutStorage(object):
                 # gae = gae * self.bad_masks[step + 1]
                 self.returns[step] = gae + self.value_preds[step]
         else:
-            self.returns = next_value
+            self.returns[-1] = next_value
             for step in reversed(range(self.num_steps)):
                 self.returns[step] = (
                 (
@@ -184,17 +184,18 @@ class RolloutStorage(object):
             actions_batch = self.actions.view(-1, self.actions.size(-1))[indices]
             return_batch = self.returns[:-1].view(-1, 1)[indices]
             masks_batch = self.masks[:-1].view(-1, 1)[indices]
+            values_batch = self.value_preds[:-1].view(-1, 1)[indices]
             old_action_log_probs_batch = self.action_log_probs.view(-1, 1)[indices]
             adv_targ = advantages.view(-1, 1)[indices]
 
-            yield observations_batch, actions_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ
+            yield observations_batch, actions_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ, values_batch
 
 
 
 def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
     wv = 1
-    we = 0.000 #0.0001
+    we = 0.01 #0.0001
     num_mini_batch = 32
 
     advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
@@ -215,9 +216,10 @@ def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1
                 masks_batch,
                 old_action_log_probs_batch,
                 adv_targ,
+                values_batch
             ) = sample
 
-            action_probs = policy_net(states)
+            action_probs,values = policy_net(states)
             # dist = Categorical(action_probs)
             dist = [Categorical(a) for a in action_probs]
             new_log_probs = torch.stack([dist[i].log_prob(actions[i]) for i in range(len(dist))])
@@ -230,21 +232,21 @@ def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1
             surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * adv_targ
             policy_loss = -torch.min(surr1, surr2).mean()
 
-            values = policy_net.get_value(states)
+            # values = policy_net.get_value(states)
             value_loss = (returns - values).pow(2).mean()
 
             optimizer.zero_grad()
             loss = value_loss * wv - entropy * we + policy_loss * wa
-            print(policy_loss.detach().cpu().numpy(), value_loss.detach().cpu().numpy(), entropy.detach().cpu().numpy(),loss.detach().cpu().numpy())
             loss.backward()
             nn.utils.clip_grad_norm_(
                 policy_net.parameters(), max_grad_norm
             )
             optimizer.step()
+            print(policy_loss.detach().cpu().numpy(), value_loss.detach().cpu().numpy(), entropy.detach().cpu().numpy(),loss.detach().cpu().numpy())
 
 def main():
 
-    replay_buffer_size = 10000
+    replay_buffer_size = 100
     use_save = False
     save_actor_path = "actor.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -294,11 +296,7 @@ def main():
             masks = float(not done)
             print(action.cpu().detach().numpy(),reward)
             if done:
-                # masks.append(False)
                 next_state = env.reset()
-            # else:
-                # masks.append(True)
-
 
             rollouts.insert(
                 state_tensor, action, log_prob, value, reward, masks
