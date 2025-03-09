@@ -20,8 +20,9 @@ class CustumEnv(gym.Wrapper):
         self.s_t = None
         self.state = None
         self.last_render_time = time.perf_counter()
-        self.fps = 60  # 设定目标帧率
+        self.fps = 240  # 设定目标帧率
         self.last_score = 0
+        self.hold_jump = 0
 
     def reset(self):
         obs = self.env.reset()
@@ -36,6 +37,19 @@ class CustumEnv(gym.Wrapper):
         self.state = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
         x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)
         x_t = self.image_to_frames(x_t)
+
+        if self.hold_jump > 25:
+            self.hold_jump = 0
+
+        if action == 5 or action == 2 or action == 4:
+            self.hold_jump += 1
+            reward += (self.hold_jump - 1) * 0.01
+        else:
+            self.hold_jump = 0
+
+
+        if info['x_pos_screen'] < 5:
+            reward -= 1
 
         reward += info['score'] - self.last_score
         if done:
@@ -84,7 +98,15 @@ class PolicyNetwork(nn.Module):
         self.fc1 = nn.Linear(1600, 512)
         self.fc2 = nn.Linear(512, action_dim)
         self.critic = nn.Linear(512, 1)
+        self._initialize_weights()
 
+    def _initialize_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, nn.init.calculate_gain('relu'))
+                # nn.init.xavier_uniform_(module.weight)
+                # nn.init.kaiming_uniform_(module.weight)
+                nn.init.constant_(module.bias, 0)
     def forward(self, x):
         x = self.pool1(torch.relu(self.conv1(x)))
         x = torch.relu(self.conv2(x))
@@ -178,9 +200,11 @@ class RolloutStorage(object):
             SubsetRandomSampler(range(batch_size)), mini_batch_size, drop_last=False
         )
         for indices in sampler:
+            # indices.sort()
             observations_batch = self.observations[:-1].view(
                 -1, *self.observations.size()[2:]
             )[indices]
+            # observations_batch = self.observations[:-1][indices]
             actions_batch = self.actions.view(-1, self.actions.size(-1))[indices]
             return_batch = self.returns[:-1].view(-1, 1)[indices]
             masks_batch = self.masks[:-1].view(-1, 1)[indices]
@@ -188,14 +212,14 @@ class RolloutStorage(object):
             old_action_log_probs_batch = self.action_log_probs.view(-1, 1)[indices]
             adv_targ = advantages.view(-1, 1)[indices]
 
-            yield observations_batch, actions_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ, values_batch
+            yield observations_batch, actions_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ #, values_batch, indices
 
 
 
 def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
     wv = 1
-    we = 0.01 #0.0001
+    we = 0.001 #0.0001
     num_mini_batch = 32
 
     advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
@@ -207,6 +231,9 @@ def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1
             advantages, num_mini_batch
         )
 
+        # action_probs, values = policy_net(rollouts.observations[:-1].view(
+        #         -1, *rollouts.observations.size()[2:]
+        #     ))
         print("-----------------")
         for sample in data_generator:
             (
@@ -216,16 +243,28 @@ def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1
                 masks_batch,
                 old_action_log_probs_batch,
                 adv_targ,
-                values_batch
+                # values_batch,
+                # indices,
             ) = sample
 
             action_probs,values = policy_net(states)
-            # dist = Categorical(action_probs)
-            dist = [Categorical(a) for a in action_probs]
-            new_log_probs = torch.stack([dist[i].log_prob(actions[i]) for i in range(len(dist))])
-            # new_log_probs = dist.log_prob(actions).unsqueeze(1)
-            entropy = torch.stack([d.entropy() for d in dist]).mean()
-            # entropy = dist.entropy().unsqueeze(1).sum(-1).mean()
+            dist = Categorical(action_probs)
+            new_log_probs = dist.log_prob(actions.squeeze(1)).unsqueeze(1)
+            # for i,id in enumerate(indices):
+            #     print(torch.sum(states[i] - rollouts.observations[:-1].view(-1, *rollouts.observations.size()[2:])[id]))
+            #     print(torch.sum(states[i] - rollouts.observations[:-1][id]))
+            #     print(torch.sum(actions[i] - rollouts.actions[id]))
+            #     print(torch.sum(returns[i] - rollouts.returns[id]))
+            #     print(torch.sum(masks_batch[i] - rollouts.masks[id]))
+            #     print(torch.sum(old_action_log_probs_batch[i] - rollouts.action_log_probs[id]))
+            #     print(torch.sum(new_log_probs[i] - rollouts.action_log_probs[id]))
+            #     print(torch.sum(values_batch[i] - rollouts.value_preds[id]))
+            #     print(torch.sum(values[i] - rollouts.value_preds[id]))
+
+            entropy = dist.entropy().unsqueeze(1).sum(-1).mean()
+            # dist = [Categorical(a) for a in action_probs]
+            # new_log_probs = torch.stack([dist[i].log_prob(actions[i]) for i in range(len(dist))])
+            # entropy = torch.stack([d.entropy() for d in dist]).mean()
 
             ratio = torch.exp(new_log_probs - old_action_log_probs_batch)
             surr1 = ratio * adv_targ
@@ -246,7 +285,7 @@ def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1
 
 def main():
 
-    replay_buffer_size = 100
+    replay_buffer_size = 10000
     use_save = False
     save_actor_path = "actor.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -276,7 +315,7 @@ def main():
     )
 
     state = env.reset()
-    state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2)
+    state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
     rollouts.observations[0].copy_(state_tensor)
     rollouts.to(device)
 
@@ -284,7 +323,7 @@ def main():
 
         for step in range(replay_buffer_size):
             env.render()
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
+            # state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
             with torch.no_grad():
                 action_probs, value = policy_net(state_tensor)
             dist = Categorical(action_probs)
@@ -294,15 +333,15 @@ def main():
             next_state, reward, done, _ = env.step(action.item())
             # masks = (~done).float()
             masks = float(not done)
-            print(action.cpu().detach().numpy(),reward)
+            # print(action.cpu().detach().numpy(),reward)
             if done:
                 next_state = env.reset()
 
+            state = next_state
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
             rollouts.insert(
                 state_tensor, action, log_prob, value, reward, masks
             )
-
-            state = next_state
 
 
         with torch.no_grad():
@@ -316,5 +355,6 @@ def main():
         if episode % 10 == 0:
             torch.save(policy_net, save_actor_path)
     env.close()
+
 if __name__ == '__main__':
     main()

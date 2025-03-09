@@ -20,10 +20,11 @@ def main():
         actions,_ = ppo(state)
         action = actions.argmax().item()
         print(actions)
-        # if iter % 2 == 0:
-        #     action = 5
-        # else:
-        #     action = 4
+        if iter % 2 == 0:
+            action = 2
+        else:
+            action = 4
+        # action = 9
         next_state, reward, done, _ = env.step(action)
         state = next_state
         iter += 1
