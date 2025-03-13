@@ -1,6 +1,4 @@
 from nes_py.wrappers import JoypadSpace
-import gym
-from gym import spaces
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,84 +6,7 @@ from torch.distributions import Categorical
 import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
-import time
-import numpy as np
-import cv2
-
-class CustumEnv(gym.Wrapper):
-    def __init__(self, env):
-        super(CustumEnv, self).__init__(env)
-        self.env = env
-        self.observation_space = spaces.Box(low=0, high=255, shape=(84, 84, 4), dtype=np.uint8)
-        self.s_t = None
-        self.state = None
-        self.last_render_time = time.perf_counter()
-        self.fps = 240  # 设定目标帧率
-        self.last_score = 0
-        self.hold_jump = 0
-
-    def reset(self):
-        obs = self.env.reset()
-        self.state = obs
-        x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)
-        x_t = self.image_to_frames(x_t)
-        self.last_score = 0
-        return x_t
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        self.state = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
-        x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)
-        x_t = self.image_to_frames(x_t)
-
-        if self.hold_jump > 25:
-            self.hold_jump = 0
-
-        if action == 5 or action == 2 or action == 4:
-            self.hold_jump += 1
-            reward += (self.hold_jump - 1) * 0.01
-        else:
-            self.hold_jump = 0
-
-
-        if info['x_pos_screen'] < 5:
-            reward -= 1
-
-        reward += info['score'] - self.last_score
-        if done:
-            if info["flag_get"]:
-                reward += 50
-            else:
-                reward -= 50
-        # if info['status'] == 'tall':
-        #     reward += 1
-
-        self.last_score = info['score']
-
-        return x_t, reward, done, info
-
-    def image_to_frames(self, x_t):
-        if self.s_t is None:
-            self.s_t = np.stack((x_t, x_t, x_t, x_t), axis=2)
-        else:
-            x_t = np.reshape(x_t, (84, 84, 1))
-            self.s_t = np.append(x_t, self.s_t[:, :, :3], axis=2)
-        return self.s_t
-
-    def render(self, mode='human'):
-        current_time = time.perf_counter()
-        elapsed = current_time - self.last_render_time
-        wait_time = max(0, 1 / self.fps - elapsed)
-        time.sleep(wait_time)
-        self.last_render_time = time.perf_counter()
-
-        if mode == 'human':
-            # 如果是人类模式，则显示图片（例如使用 OpenCV 显示）
-            cv2.imshow("Super Mario", self.state)
-            cv2.waitKey(1)
-        elif mode == 'rgb_array':
-            # 返回当前帧的图像数据
-            return self.state
+from env import CustumEnv,CustumSingleEnv,SkipEnv
 
 
 class PolicyNetwork(nn.Module):
@@ -125,7 +46,6 @@ class PolicyNetwork(nn.Module):
         x = torch.relu(self.fc1(x))
         val = self.critic(x)
         return val
-
 
 class RolloutStorage(object):
     def __init__(self, num_steps, num_processes, obs_shape, action_dim, state_size):
@@ -214,13 +134,11 @@ class RolloutStorage(object):
 
             yield observations_batch, actions_batch, return_batch, masks_batch, old_action_log_probs_batch, adv_targ #, values_batch, indices
 
-
-
 def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
     wv = 1
-    we = 0.001 #0.0001
-    num_mini_batch = 32
+    we = 0.01 #0.0001
+    num_mini_batch = 16
 
     advantages = rollouts.returns[:-1] - rollouts.value_preds[:-1]
     # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -285,7 +203,11 @@ def ppo_update(policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1
 
 def main():
 
-    replay_buffer_size = 10000
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(996)
+    else:
+        torch.manual_seed(996)
+    replay_buffer_size = 2048
     use_save = False
     save_actor_path = "actor.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -293,7 +215,10 @@ def main():
     # 创建马里奥环境
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     env = JoypadSpace(env, COMPLEX_MOVEMENT)
-    env = CustumEnv(env)
+    # env = CustumEnv(env)
+    env = CustumSingleEnv(env)
+    env = SkipEnv(env)
+
     action_dim = env.action_space.n
 
     if use_save:
@@ -315,7 +240,8 @@ def main():
     )
 
     state = env.reset()
-    state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
+    # state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
+    state_tensor = torch.FloatTensor(state).to(device)
     rollouts.observations[0].copy_(state_tensor)
     rollouts.to(device)
 
@@ -338,14 +264,14 @@ def main():
                 next_state = env.reset()
 
             state = next_state
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
+            state_tensor = torch.FloatTensor(state).to(device)
             rollouts.insert(
                 state_tensor, action, log_prob, value, reward, masks
             )
 
 
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
+            state_tensor = torch.FloatTensor(state).to(device)
             next_value = policy_net.get_value(state_tensor)
         rollouts.compute_returns(next_value, True, gamma, gae_lambda)
 
