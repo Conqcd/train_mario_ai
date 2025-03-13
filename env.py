@@ -3,6 +3,12 @@ from gym import spaces
 import cv2
 import numpy as np
 import time
+import torch.multiprocessing as mp
+import gym_super_mario_bros
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+from nes_py.wrappers import JoypadSpace
+
+obsShape = (4, 84, 84)
 
 class CustumEnv(gym.Wrapper):
     def __init__(self, env):
@@ -149,12 +155,9 @@ class SkipEnv(gym.Wrapper):
     def __init__(self, env):
         super(SkipEnv, self).__init__(env)
         self.env = env
-        self.observation_space = spaces.Box(low=0, high=255, shape=(84, 84, 4), dtype=np.uint8)
-        self.s_t = None
-        self.state = None
-        self.last_render_time = time.perf_counter()
         self.skip = 4
         self.states = np.zeros((self.skip, 84, 84), dtype=np.float32)
+        self.last_shape = (self.skip, 84, 84)
 
     def reset(self):
         state = self.env.reset()
@@ -177,4 +180,36 @@ class SkipEnv(gym.Wrapper):
         self.states[:-1] = self.states[1:]
         self.states[-1] = max_state
 
-        return self.states.astype(np.float32), total_reward, done, info
+        if self.states.shape[0] == 1 :
+            print(action)
+
+        return self.states[None, :, :, :].astype(np.float32), total_reward, done, info
+
+class MultipleEnvironments:
+    def __init__(self, num_envs, num_states = 4):
+        self.agent_conns, self.env_conns = zip(*[mp.Pipe() for _ in range(num_envs)])
+        self.num_states = num_states
+        self.num_actions = len(COMPLEX_MOVEMENT)
+        self.processes = []
+        for index in range(num_envs):
+            process = mp.Process(target=self.run, args=(index, 1))
+            # self.processes.append(process)
+            process.start()
+
+    def run(self, index, a):
+        env = gym_super_mario_bros.make('SuperMarioBros-v0')
+        env = JoypadSpace(env, COMPLEX_MOVEMENT)
+        env = CustumSingleEnv(env)
+        env = SkipEnv(env)
+        while True:
+            request, action = self.env_conns[index].recv()
+            if request == "step":
+                self.env_conns[index].send(env.step(action.item()))
+            elif request == "reset":
+                self.env_conns[index].send(env.reset())
+            else:
+                raise NotImplementedError
+
+    def close(self):
+        for process in self.processes:
+            process.close()

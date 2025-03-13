@@ -1,12 +1,13 @@
-from nes_py.wrappers import JoypadSpace
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.multiprocessing as _mp
 from torch.distributions import Categorical
-import gym_super_mario_bros
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
-from env import CustumEnv,CustumSingleEnv,SkipEnv
+from env import CustumEnv,CustumSingleEnv,SkipEnv,MultipleEnvironments,obsShape
+import ppo_play
+import numpy as np
 
 
 class PolicyNetwork(nn.Module):
@@ -207,25 +208,35 @@ def main():
         torch.cuda.manual_seed(996)
     else:
         torch.manual_seed(996)
-    replay_buffer_size = 2048
-    use_save = False
+    replay_buffer_size = 256
+    use_save = True
     save_actor_path = "actor.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
     # 创建马里奥环境
-    env = gym_super_mario_bros.make('SuperMarioBros-v0')
-    env = JoypadSpace(env, COMPLEX_MOVEMENT)
-    # env = CustumEnv(env)
-    env = CustumSingleEnv(env)
-    env = SkipEnv(env)
-
-    action_dim = env.action_space.n
+    action_dim = len(COMPLEX_MOVEMENT)
+    nums_processes = 8
+    envs = MultipleEnvironments(nums_processes)
+    max_actions = 500
 
     if use_save:
         policy_net = torch.load(save_actor_path, map_location = device, weights_only=False)
     else:
         policy_net = PolicyNetwork(action_dim).to(device)
+
+
+    policy_net.share_memory()
+
+    mp = _mp.get_context("spawn")
+    process = mp.Process(target=ppo_play.play, args=(max_actions, policy_net, action_dim, device))
+    process.start()
+    policy_net._initialize_weights()
+
     optimizer = optim.AdamW(policy_net.parameters(), lr=1e-4, amsgrad=True,weight_decay=0.001)
+
+
+    [agent_conn.send(("reset", None)) for agent_conn in envs.agent_conns]
+    state = [agent_conn.recv() for agent_conn in envs.agent_conns]
 
     max_episodes = 1000000
     gamma = 0.90 #0.99
@@ -233,14 +244,12 @@ def main():
 
     rollouts = RolloutStorage(
         replay_buffer_size,
-        1,
-        (env.observation_space.shape[-1],*env.observation_space.shape[:-1]),
+        nums_processes,
+        obsShape,
         action_dim,
         0,
     )
 
-    state = env.reset()
-    # state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
     state_tensor = torch.FloatTensor(state).to(device)
     rollouts.observations[0].copy_(state_tensor)
     rollouts.to(device)
@@ -248,28 +257,27 @@ def main():
     for episode in range(max_episodes):
 
         for step in range(replay_buffer_size):
-            env.render()
-            # state_tensor = torch.FloatTensor(state).unsqueeze(0).permute(0, 3, 1, 2).to(device)
             with torch.no_grad():
                 action_probs, value = policy_net(state_tensor)
             dist = Categorical(action_probs)
             action = dist.sample()
             log_prob = dist.log_prob(action)
 
-            next_state, reward, done, _ = env.step(action.item())
-            # masks = (~done).float()
-            masks = float(not done)
-            # print(action.cpu().detach().numpy(),reward)
-            if done:
-                next_state = env.reset()
-
-            state = next_state
+            [agent_conn.send(("step", act)) for agent_conn, act in zip(envs.agent_conns, action.cpu())]
+            state, reward, done, _ = zip(*[agent_conn.recv() for agent_conn in envs.agent_conns])
+            masks = 1 - torch.FloatTensor(done).to(device)
+            reward = torch.FloatTensor(reward).to(device)
+            # for states in state:
+            #     print(states.shape)
+            # print(step)
+            state = torch.from_numpy(np.concatenate(state, 0))
             state_tensor = torch.FloatTensor(state).to(device)
             rollouts.insert(
-                state_tensor, action, log_prob, value, reward, masks
+                state_tensor, action.unsqueeze(1), log_prob.unsqueeze(1), value, reward.unsqueeze(1), masks.unsqueeze(1)
             )
 
 
+        # print(episode)
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).to(device)
             next_value = policy_net.get_value(state_tensor)
@@ -280,7 +288,7 @@ def main():
 
         if episode % 10 == 0:
             torch.save(policy_net, save_actor_path)
-    env.close()
+    envs.close()
 
 if __name__ == '__main__':
     main()
