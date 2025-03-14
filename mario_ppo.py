@@ -230,7 +230,12 @@ def main():
     mp = _mp.get_context("spawn")
     process = mp.Process(target=ppo_play.play, args=(max_actions, policy_net, action_dim, device))
     process.start()
-    policy_net._initialize_weights()
+
+    if use_save:
+        policy_net.load_state_dict(torch.load(save_actor_path, map_location = device, weights_only=False).state_dict())
+        policy_net.to(device)
+    else:
+        policy_net._initialize_weights()
 
     optimizer = optim.AdamW(policy_net.parameters(), lr=1e-4, amsgrad=True,weight_decay=0.001)
 
