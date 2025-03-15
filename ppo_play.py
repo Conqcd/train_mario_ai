@@ -5,9 +5,9 @@ from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from nes_py.wrappers import JoypadSpace
 from env import CustumEnv,CustumSingleEnv,SkipEnv
 
-def play(max_action, global_model, num_actions, device):
+def play(max_action, global_model, num_actions, word, device):
     local_model = PolicyNetwork(num_actions).to(device)
-    env = gym_super_mario_bros.make('SuperMarioBros-v0')
+    env = gym_super_mario_bros.make(word)
     env = JoypadSpace(env, COMPLEX_MOVEMENT)
     env = CustumSingleEnv(env)
     env = SkipEnv(env)
@@ -33,12 +33,12 @@ def play(max_action, global_model, num_actions, device):
         # print(f'Return: {reward}')
 
 def main():
-    env = gym_super_mario_bros.make('SuperMarioBros-v0')
+    env = gym_super_mario_bros.make('SuperMarioBros-1-2-v0')
     env = JoypadSpace(env, COMPLEX_MOVEMENT)
     env = CustumSingleEnv(env)
     env = SkipEnv(env)
     state = env.reset()
-    save_ppo_path = "actor.pth"
+    save_ppo_path = "actor-1-1.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     ppo = torch.load(save_ppo_path, map_location=device, weights_only=False)
     iter = 0

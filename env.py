@@ -186,18 +186,18 @@ class SkipEnv(gym.Wrapper):
         return self.states[None, :, :, :].astype(np.float32), total_reward, done, info
 
 class MultipleEnvironments:
-    def __init__(self, num_envs, num_states = 4):
+    def __init__(self, num_envs, world, num_states = 4):
         self.agent_conns, self.env_conns = zip(*[mp.Pipe() for _ in range(num_envs)])
         self.num_states = num_states
         self.num_actions = len(COMPLEX_MOVEMENT)
         self.processes = []
         for index in range(num_envs):
-            process = mp.Process(target=self.run, args=(index, 1))
+            process = mp.Process(target=self.run, args=(index, world))
             # self.processes.append(process)
             process.start()
 
-    def run(self, index, a):
-        env = gym_super_mario_bros.make('SuperMarioBros-v0')
+    def run(self, index, world):
+        env = gym_super_mario_bros.make(world)
         env = JoypadSpace(env, COMPLEX_MOVEMENT)
         env = CustumSingleEnv(env)
         env = SkipEnv(env)

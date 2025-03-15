@@ -209,14 +209,15 @@ def main():
     else:
         torch.manual_seed(996)
     replay_buffer_size = 256
-    use_save = True
+    use_save = False
     save_actor_path = "actor.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    world = 'SuperMarioBros-1-1-v0'
 
     # 创建马里奥环境
     action_dim = len(COMPLEX_MOVEMENT)
     nums_processes = 8
-    envs = MultipleEnvironments(nums_processes)
+    envs = MultipleEnvironments(nums_processes,world)
     max_actions = 500
 
     if use_save:
@@ -228,7 +229,7 @@ def main():
     policy_net.share_memory()
 
     mp = _mp.get_context("spawn")
-    process = mp.Process(target=ppo_play.play, args=(max_actions, policy_net, action_dim, device))
+    process = mp.Process(target=ppo_play.play, args=(max_actions, policy_net, action_dim, world, device))
     process.start()
 
     if use_save:
