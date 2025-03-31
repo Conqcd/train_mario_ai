@@ -212,7 +212,7 @@ def main():
     use_save = False
     save_actor_path = "actor.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    world = 'SuperMarioBros-1-2-v0'
+    world = 'SuperMarioBros-2-2-v0'
 
     # 创建马里奥环境
     action_dim = len(COMPLEX_MOVEMENT)
