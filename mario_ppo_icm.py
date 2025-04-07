@@ -39,7 +39,7 @@ class Decoder(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x, next_x):
-        x = self.relu(self.fc1(torch.cat([x, next],dim = 1)))
+        x = self.relu(self.fc1(torch.cat([x, next_x],dim = 1)))
         x = self.relu(self.fc2(x))
         return x
 
@@ -63,7 +63,7 @@ class ICMNetWork(nn.Module):
         self.action_dim = action_dim
         self.latent_dim = latent_dim
         self.encoder = Encoder(state_dim,latent_dim)
-        self.decoder = Decoder(state_dim,latent_dim)
+        self.decoder = Decoder(action_dim,latent_dim)
         self.step = Step(action_dim, latent_dim)
         self._initialize_weights()
 
@@ -109,7 +109,7 @@ class RolloutStorage(object):
         self.masks = self.masks.to(device)
 
     def insert(
-            self, current_obs, next_obs, action, action_log_prob, value_pred, reward, mask
+            self, current_obs, action, action_log_prob, value_pred, reward, mask
     ):
         self.observations[self.step + 1].copy_(current_obs)
         self.actions[self.step].copy_(action)
@@ -180,7 +180,7 @@ def icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip
     # advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
     with torch.no_grad():
-        action_probs, _ = policy_net(rollouts.observations)
+        all_action_probs, _ = policy_net(rollouts.observations[:-1].view(-1, *rollouts.observations.size()[2:]))
 
 
     for _ in range(10):  # Update for 10 epochs
@@ -189,9 +189,6 @@ def icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip
             advantages, num_mini_batch
         )
 
-        # action_probs, values = policy_net(rollouts.observations[:-1].view(
-        #         -1, *rollouts.observations.size()[2:]
-        #     ))
         print("-----------------")
         for sample in data_generator:
             (
@@ -228,7 +225,7 @@ def icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip
             optimizer.step()
             print(policy_loss.detach().cpu().numpy(), value_loss.detach().cpu().numpy(), entropy.detach().cpu().numpy(),loss.detach().cpu().numpy())
 
-    _,forward_loss,inv_loss = icm_net(rollouts.observations[:-1], rollouts.observations[1:], action_probs[:-1])
+    _,forward_loss,inv_loss = icm_net(rollouts.observations[:-1].view(-1, *rollouts.observations.size()[2:]), rollouts.observations[1:].view(-1, *rollouts.observations.size()[2:]), all_action_probs)
     icm_optimizer.zero_grad()
     icm_loss = forward_loss + inv_loss
     icm_loss.backward()
@@ -245,7 +242,7 @@ def main():
     save_actor_path = "actor-icm.pth"
     save_icm_path = "icm.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    world = 'SuperMarioBros-1-1-v0'
+    world = 'SuperMarioBros-1-2-v0'
 
     # 创建马里奥环境
     action_dim = len(COMPLEX_MOVEMENT)
