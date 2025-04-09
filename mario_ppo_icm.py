@@ -144,6 +144,8 @@ def icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip
     icm_optimizer.zero_grad()
     icm_loss = forward_loss + inv_loss
     icm_loss.backward()
+    icm_optimizer.step()
+    print("ICM",icm_loss.detach().cpu().numpy(), forward_loss.detach().cpu().numpy(), inv_loss.detach().cpu().numpy())
 
 
 def main():
@@ -153,7 +155,7 @@ def main():
     else:
         torch.manual_seed(996)
     replay_buffer_size = 256
-    use_save = False
+    use_save = True
     save_actor_path = "actor-icm.pth"
     save_icm_path = "icm.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
