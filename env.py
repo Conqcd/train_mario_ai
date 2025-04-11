@@ -174,14 +174,13 @@ class SkipEnv(gym.Wrapper):
             if i >= self.skip / 2:
                 last_states.append(state)
             if done:
+                if info["flag_get"]:
+                    print("done")
                 self.reset()
                 return self.states[None, :, :, :].astype(np.float32), total_reward, done, info
         max_state = np.max(np.concatenate(last_states, 0), 0)
         self.states[:-1] = self.states[1:]
         self.states[-1] = max_state
-
-        if self.states.shape[0] == 1 :
-            print(action)
 
         return self.states[None, :, :, :].astype(np.float32), total_reward, done, info
 

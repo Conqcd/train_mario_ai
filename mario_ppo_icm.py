@@ -142,7 +142,7 @@ def icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip
 
     _,forward_loss,inv_loss = icm_net(rollouts.observations[:-1].view(-1, *rollouts.observations.size()[2:]), rollouts.observations[1:].view(-1, *rollouts.observations.size()[2:]), all_action_probs)
     icm_optimizer.zero_grad()
-    icm_loss = forward_loss + inv_loss
+    icm_loss = forward_loss + inv_loss * 20
     icm_loss.backward()
     icm_optimizer.step()
     print("ICM",icm_loss.detach().cpu().numpy(), forward_loss.detach().cpu().numpy(), inv_loss.detach().cpu().numpy())
@@ -159,7 +159,7 @@ def main():
     save_actor_path = "actor-icm.pth"
     save_icm_path = "icm.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    world = 'SuperMarioBros-1-2-v0'
+    world = 'SuperMarioBros-3-3-v0'
 
     # 创建马里奥环境
     action_dim = len(COMPLEX_MOVEMENT)
