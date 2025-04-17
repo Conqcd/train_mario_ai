@@ -5,11 +5,11 @@ import torch.optim as optim
 import torch.multiprocessing as _mp
 from torch.distributions import Categorical
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
-from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from env import MultipleEnvironments,obsShape
 import ppo_play
 import numpy as np
-from mario_ppo import PolicyNetwork, RolloutStorage
+from mario_ppo import RolloutStorage
+from mario_ppo_icm import ICMNetWork
 
 class Encoder(nn.Module):
     def __init__(self,state_dim, latent_dim):
@@ -21,7 +21,6 @@ class Encoder(nn.Module):
         self.fc1 = nn.Linear(1600, 512)
         self.fc2 = nn.Linear(512, latent_dim)
 
-
     def forward(self, x):
         x = self.pool1(torch.relu(self.conv1(x)))
         x = torch.relu(self.conv2(x))
@@ -31,40 +30,36 @@ class Encoder(nn.Module):
         ac = self.fc2(x)
         return torch.softmax(ac,dim=-1)
 
-class Decoder(nn.Module):
-    def __init__(self,action_dim, latent_dim):
+
+class PolicyNetwork(nn.Module):
+    def __init__(self,state_dim, action_dim):
         super().__init__()
-        self.fc1 = nn.Linear(latent_dim + latent_dim, 512)
+        self.fc1 = nn.Linear(state_dim, 512)
         self.fc2 = nn.Linear(512, action_dim)
-        self.relu = nn.ReLU()
-
-    def forward(self, x, next_x):
-        x = self.relu(self.fc1(torch.cat([x, next_x],dim = 1)))
-        x = self.relu(self.fc2(x))
-        return x
-
-class Step(nn.Module):
-    def __init__(self,action_dim, latent_dim):
-        super().__init__()
-        self.fc1 = nn.Linear(latent_dim + action_dim, 512)
-        self.fc2 = nn.Linear(512, latent_dim)
-        self.relu = nn.ReLU()
+        self.critic = nn.Linear(512, 1)
 
     def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        return x
+        x = torch.relu(self.fc1(x))
+        ac = self.fc2(x)
+        val = self.critic(x)
+        return torch.softmax(ac,dim=-1),val
 
 
-class ICMNetWork(nn.Module):
-    def __init__(self,state_dim, action_dim, latent_dim):
+    def get_value(self,x):
+        x = torch.relu(self.fc1(x))
+        val = self.critic(x)
+        return val
+
+
+class HRLNetWork(nn.Module):
+    def __init__(self,state_dim, action_dim, latent_dim, goal_dim):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.latent_dim = latent_dim
-        self.encoder = Encoder(state_dim,latent_dim)
-        self.decoder = Decoder(action_dim,latent_dim)
-        self.step = Step(action_dim, latent_dim)
+
+        self.encoder = Encoder(state_dim, latent_dim)
+        self.policy = PolicyNetwork(action_dim,latent_dim)
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -74,18 +69,23 @@ class ICMNetWork(nn.Module):
                 # nn.init.xavier_uniform_(module.weight)
                 # nn.init.kaiming_uniform_(module.weight)
                 nn.init.constant_(module.bias, 0)
-    def forward(self, x, next_x, action):
-        x_l = self.encoder(x)
-        next_x_l = self.encoder(next_x)
-        next_x_l_p = self.step(torch.cat([x_l, action], dim=1))
-        action_p = self.decoder(x_l, next_x_l)
-        forward_loss = F.mse_loss(next_x_l_p, next_x_l)
-        action_loss = F.cross_entropy(action_p, action)
-        intrinsic_reward = 0.5 * F.mse_loss(next_x_l_p, next_x_l, reduction="none").mean(dim=1)
-        return intrinsic_reward,forward_loss, action_loss
+    def forward(self, x):
+        x = self.pool1(torch.relu(self.conv1(x)))
+        x = torch.relu(self.conv2(x))
+        x = torch.relu(self.conv3(x))
+        x = x.reshape(-1,1600)
+        return self.policy(x)
+
+    def get_value(self,x):
+        x = self.pool1(torch.relu(self.conv1(x)))
+        x = torch.relu(self.conv2(x))
+        x = torch.relu(self.conv3(x))
+        x = x.reshape(-1,1600)
+        return self.policy.get_value(x)
 
 
-def icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
+
+def hrl_icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
     wv = 1
     we = 0.01 #0.0001
@@ -156,7 +156,7 @@ def main():
         torch.manual_seed(996)
     replay_buffer_size = 256
     use_save = False
-    save_actor_path = "actor-icm.pth"
+    save_actor_path = "hrl-icm.pth"
     save_icm_path = "icm.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     world = 'SuperMarioBros-4-4-v0'
@@ -173,7 +173,7 @@ def main():
         policy_net = torch.load(save_actor_path, map_location = device, weights_only=False)
         icm_net = torch.load(save_icm_path, map_location = device, weights_only=False)
     else:
-        policy_net = PolicyNetwork(action_dim).to(device)
+        policy_net = HRLNetWork(obsShape, action_dim, 64, 3).to(device)
         icm_net = ICMNetWork(obsShape, action_dim, 64).to(device)
 
 
@@ -240,13 +240,12 @@ def main():
             )
 
 
-        # print(episode)
         with torch.no_grad():
             state_tensor = torch.FloatTensor(state).to(device)
             next_value = policy_net.get_value(state_tensor)
         rollouts.compute_returns(next_value, True, gamma, gae_lambda)
 
-        icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts)
+        hrl_icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts)
         rollouts.after_update()
 
         if episode % 10 == 0:
