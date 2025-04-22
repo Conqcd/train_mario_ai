@@ -151,6 +151,63 @@ class CustumSingleEnv(gym.Wrapper):
             # 返回当前帧的图像数据
             return self.state
 
+class CustumSingleOptionEnv(gym.Wrapper):
+    def __init__(self, env):
+        super(CustumSingleOptionEnv, self).__init__(env)
+        self.env = env
+        self.observation_space = spaces.Box(low=0, high=255, shape=(84, 84, 4), dtype=np.uint8)
+        self.state = None
+        self.last_render_time = time.perf_counter()
+        self.fps = 240  # 设定目标帧率
+        self.last_score = 0
+        self.hold_jump = 0
+        self.option = 0
+
+    def reset(self):
+        obs = self.env.reset()
+        self.state = obs
+        x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)[None, :, :]
+        self.last_score = 0
+        return x_t
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        self.state = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
+        x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)[None, :, :]
+
+        reward += (info['score'] - self.last_score) / 40
+        if done:
+            if info["flag_get"]:
+                reward += 50
+            else:
+                reward -= 50
+        # if info['status'] == 'tall':
+        #     reward += 1
+
+        self.last_score = info['score']
+
+        return x_t, reward / 10, done, info
+
+
+    def set_option(self, option):
+        self.env.set_option(option)
+
+    def render(self, mode='human'):
+        current_time = time.perf_counter()
+        elapsed = current_time - self.last_render_time
+        wait_time = max(0, 1 / self.fps - elapsed)
+        time.sleep(wait_time)
+        self.last_render_time = time.perf_counter()
+
+        if mode == 'human':
+            # 如果是人类模式，则显示图片（例如使用 OpenCV 显示）
+            cv2.imshow("Super Mario", self.state)
+            cv2.waitKey(1)
+        elif mode == 'rgb_array':
+            # 返回当前帧的图像数据
+            return self.state
+
+
 class SkipEnv(gym.Wrapper):
     def __init__(self, env):
         super(SkipEnv, self).__init__(env)
@@ -184,14 +241,20 @@ class SkipEnv(gym.Wrapper):
 
         return self.states[None, :, :, :].astype(np.float32), total_reward, done, info
 
+    def set_option(self, option):
+        self.env.set_option(option)
+
 class MultipleEnvironments:
-    def __init__(self, num_envs, world, num_states = 4):
+    def __init__(self, num_envs, world, num_states = 4, use_option = False):
         self.agent_conns, self.env_conns = zip(*[mp.Pipe() for _ in range(num_envs)])
         self.num_states = num_states
         self.num_actions = len(COMPLEX_MOVEMENT)
         self.processes = []
         for index in range(num_envs):
-            process = mp.Process(target=self.run, args=(index, world))
+            if use_option:
+                process = mp.Process(target=self.run_option, args=(index, world))
+            else:
+                process = mp.Process(target=self.run, args=(index, world))
             # self.processes.append(process)
             process.start()
 
@@ -204,6 +267,21 @@ class MultipleEnvironments:
             request, action = self.env_conns[index].recv()
             if request == "step":
                 self.env_conns[index].send(env.step(action.item()))
+            elif request == "reset":
+                self.env_conns[index].send(env.reset())
+            else:
+                raise NotImplementedError
+
+    def run_option(self, index, world):
+        env = gym_super_mario_bros.make(world)
+        env = JoypadSpace(env, COMPLEX_MOVEMENT)
+        env = CustumSingleOptionEnv(env)
+        env = SkipEnv(env)
+        while True:
+            request, action, option = self.env_conns[index].recv()
+            if request == "step":
+                env.set_option(option)
+                self.env_conns[index].send(env.step(action.item(), option.item()))
             elif request == "reset":
                 self.env_conns[index].send(env.reset())
             else:

@@ -29,7 +29,7 @@ class Encoder(nn.Module):
         x = x.reshape(-1,1600)
         x = torch.relu(self.fc1(x))
         ac = self.fc2(x)
-        return torch.softmax(ac,dim=-1)
+        return ac
 
 class Decoder(nn.Module):
     def __init__(self,action_dim, latent_dim):
@@ -155,11 +155,11 @@ def main():
     else:
         torch.manual_seed(996)
     replay_buffer_size = 256
-    use_save = True
+    use_save = False
     save_actor_path = "actor-icm.pth"
     save_icm_path = "icm.pth"
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
-    world = 'SuperMarioBros-3-3-v0'
+    world = 'SuperMarioBros-8-1-v0'
 
     # 创建马里奥环境
     action_dim = len(COMPLEX_MOVEMENT)

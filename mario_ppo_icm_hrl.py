@@ -9,7 +9,7 @@ from env import MultipleEnvironments,obsShape
 import ppo_play
 import numpy as np
 from mario_ppo import RolloutStorage
-from mario_ppo_icm import ICMNetWork
+from mario_ppo_icm import Decoder, Step
 
 class Encoder(nn.Module):
     def __init__(self,state_dim, latent_dim):
@@ -18,48 +18,25 @@ class Encoder(nn.Module):
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1, padding_mode='replicate')
         self.conv3 = nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1, padding_mode='replicate')
         self.pool1 = nn.MaxPool2d(2, 2, padding=1)
-        self.fc1 = nn.Linear(1600, 512)
-        self.fc2 = nn.Linear(512, latent_dim)
+        self.fc1 = nn.Linear(1600, latent_dim)
 
     def forward(self, x):
         x = self.pool1(torch.relu(self.conv1(x)))
         x = torch.relu(self.conv2(x))
         x = torch.relu(self.conv3(x))
         x = x.reshape(-1,1600)
-        x = torch.relu(self.fc1(x))
-        ac = self.fc2(x)
-        return torch.softmax(ac,dim=-1)
+        x = self.fc1(x)
+        return x
 
-
-class PolicyNetwork(nn.Module):
-    def __init__(self,state_dim, action_dim):
-        super().__init__()
-        self.fc1 = nn.Linear(state_dim, 512)
-        self.fc2 = nn.Linear(512, action_dim)
-        self.critic = nn.Linear(512, 1)
-
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        ac = self.fc2(x)
-        val = self.critic(x)
-        return torch.softmax(ac,dim=-1),val
-
-
-    def get_value(self,x):
-        x = torch.relu(self.fc1(x))
-        val = self.critic(x)
-        return val
-
-
-class HRLNetWork(nn.Module):
-    def __init__(self,state_dim, action_dim, latent_dim, goal_dim):
+class ICMNetWork(nn.Module):
+    def __init__(self,state_dim, action_dim, latent_dim):
         super().__init__()
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.latent_dim = latent_dim
-
-        self.encoder = Encoder(state_dim, latent_dim)
-        self.policy = PolicyNetwork(action_dim,latent_dim)
+        self.encoder = Encoder(state_dim,latent_dim)
+        self.decoder = Decoder(action_dim,latent_dim)
+        self.step = Step(action_dim, latent_dim)
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -69,21 +46,94 @@ class HRLNetWork(nn.Module):
                 # nn.init.xavier_uniform_(module.weight)
                 # nn.init.kaiming_uniform_(module.weight)
                 nn.init.constant_(module.bias, 0)
+    def forward(self, x, next_x, action):
+        x_l = self.encoder(x)
+        next_x_l = self.encoder(next_x)
+        next_x_l_p = self.step(torch.cat([x_l, action], dim=1))
+        action_p = self.decoder(x_l, next_x_l)
+        forward_loss = F.mse_loss(next_x_l_p, next_x_l)
+        action_loss = F.cross_entropy(action_p, action)
+        intrinsic_reward = 0.5 * F.mse_loss(next_x_l_p, next_x_l, reduction="none").mean(dim=1)
+        return intrinsic_reward,forward_loss, action_loss
+
+
+
+class IntraPolicy(nn.Module):
+    def __init__(self,state_dim, action_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(state_dim, 512)
+        self.fc2 = nn.Linear(512, action_dim)
+
     def forward(self, x):
-        x = self.pool1(torch.relu(self.conv1(x)))
-        x = torch.relu(self.conv2(x))
-        x = torch.relu(self.conv3(x))
-        x = x.reshape(-1,1600)
-        return self.policy(x)
+        x = torch.relu(self.fc1(x))
+        ac = self.fc2(x)
+        return torch.softmax(ac,dim=-1)
+
+class OptionPolicy(nn.Module):
+    def __init__(self,state_dim, option_nums):
+        super().__init__()
+        self.fc1 = nn.Linear(state_dim, 512)
+        self.fc2 = nn.Linear(512, option_nums)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        ac = self.fc2(x)
+        return torch.softmax(ac,dim=-1)
+
+class Critic(nn.Module):
+    def __init__(self,state_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(state_dim, 512)
+        self.fc2 = nn.Linear(512, 1)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        ac = self.fc2(x)
+        return ac
+
+class OptionTermination(nn.Module):
+    def __init__(self,state_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(state_dim, 512)
+        self.fc2 = nn.Linear(512, 1)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        ac = self.fc2(x)
+        return torch.sigmoid(ac,dim=-1)
+
+class HRLNetWork(nn.Module):
+    def __init__(self,state_dim, action_dim, latent_dim, option_nums):
+        super().__init__()
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.latent_dim = latent_dim
+
+        self.encoder = Encoder(state_dim, latent_dim)
+        self.option_chooser = OptionPolicy(state_dim, latent_dim)
+        self.option_terminator = OptionTermination(state_dim)
+        self.policy = [IntraPolicy(latent_dim,action_dim) for _ in range(option_nums)]
+        self.critic = Critic(state_dim)
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, nn.init.calculate_gain('relu'))
+                # nn.init.xavier_uniform_(module.weight)
+                # nn.init.kaiming_uniform_(module.weight)
+                nn.init.constant_(module.bias, 0)
+    def forward(self, x, option):
+        x = self.encoder(x)
+        return self.policy[option](x)
 
     def get_value(self,x):
-        x = self.pool1(torch.relu(self.conv1(x)))
-        x = torch.relu(self.conv2(x))
-        x = torch.relu(self.conv3(x))
-        x = x.reshape(-1,1600)
-        return self.policy.get_value(x)
+        x = self.encoder(x)
+        return self.critic(x)
 
-
+    def choose_option(self,x):
+        x = self.encoder(x)
+        return self.option_chooser(x)
 
 def hrl_icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1
