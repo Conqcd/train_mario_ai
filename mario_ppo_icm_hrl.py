@@ -110,10 +110,10 @@ class HRLNetWork(nn.Module):
         self.latent_dim = latent_dim
 
         self.encoder = Encoder(state_dim, latent_dim)
-        self.option_chooser = OptionPolicy(state_dim, latent_dim)
-        self.option_terminator = OptionTermination(state_dim)
+        self.option_chooser = OptionPolicy(latent_dim, latent_dim)
+        self.option_terminator = OptionTermination(latent_dim)
         self.policy = [IntraPolicy(latent_dim,action_dim) for _ in range(option_nums)]
-        self.critic = Critic(state_dim)
+        self.critic = Critic(latent_dim)
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -134,6 +134,10 @@ class HRLNetWork(nn.Module):
     def choose_option(self,x):
         x = self.encoder(x)
         return self.option_chooser(x)
+
+    def is_terminated(self,x):
+        x = self.encoder(x)
+        return self.option_terminator(x)
 
 def hrl_icm_ppo_update(icm_net, icm_optimizer, policy_net, optimizer, rollouts, clip_epsilon=0.2,max_grad_norm=1.0):
     wa = 1

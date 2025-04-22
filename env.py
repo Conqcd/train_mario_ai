@@ -160,7 +160,9 @@ class CustumSingleOptionEnv(gym.Wrapper):
         self.last_render_time = time.perf_counter()
         self.fps = 240  # 设定目标帧率
         self.last_score = 0
-        self.hold_jump = 0
+        self.last_coin = 0
+        self.last_x = 0
+        self.last_time = 0
         self.option = 0
 
     def reset(self):
@@ -168,23 +170,31 @@ class CustumSingleOptionEnv(gym.Wrapper):
         self.state = obs
         x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)[None, :, :]
         self.last_score = 0
+        self.last_coin = 0
+        self.last_time = 0
         return x_t
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self.state = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
         x_t = cv2.cvtColor(cv2.resize(obs, (84, 84)), cv2.COLOR_BGR2GRAY)[None, :, :]
-
-        reward += (info['score'] - self.last_score) / 40
-        if done:
-            if info["flag_get"]:
-                reward += 50
-            else:
-                reward -= 50
-        # if info['status'] == 'tall':
-        #     reward += 1
-
-        self.last_score = info['score']
+        if self.option == 1:
+            reward = info["coins"] - self.last_coin
+            reward += min(info["time"] - self.last_time,0)
+            if done:
+                if info["flag_get"]:
+                    pass
+                else:
+                    reward -= 75
+        elif self.option == 0:
+            if done:
+                if info["flag_get"]:
+                    reward += 50
+                else:
+                    reward -= 50
+        # reward += (info['score'] - self.last_score) / 40
+        self.last_coin = info["coins"]
+        self.last_time = info["time"]
 
         return x_t, reward / 10, done, info
 
